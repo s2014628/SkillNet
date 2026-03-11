@@ -237,8 +237,6 @@ def normalize_api_skill(
     eval_text = "\n".join(eval_parts) if eval_parts else ""
 
     body_parts: List[str] = []
-    if description:
-        body_parts.append(f"## Description\n{description}")
     if eval_text:
         body_parts.append(f"## Quality Evaluation\n{eval_text}")
 
