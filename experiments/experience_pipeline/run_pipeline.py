@@ -2,8 +2,8 @@
 SkillNet Experience Data Pipeline
 
 End-to-end pipeline for converting SkillNet skills into experience data:
-1. Load skill definitions from SkillNet skill directories
-2. Build full skill content (SKILL.md + references + scripts)
+1. Load skill definitions from SkillNet API (258k+ skills) or local directories
+2. Build full skill content for LLM analysis
 3. Generate experience summaries via LLM analysis
 4. Build final experience data (classified by experience type)
 
@@ -11,22 +11,25 @@ This pipeline directly converts skills into experience data WITHOUT running
 them through the Stack-Planner agent workflow. The skills themselves encode
 the operational knowledge that would otherwise be derived from benchmark runs.
 
-Experience Types:
-- SOP系统层经验 (SOP System Experience): ALFWorld, ScienceWorld, WebShop
-  - Step-by-step action procedures, decision patterns, error recovery
+Modes:
+- API mode (default): Fetches skills from SkillNet REST API (258k+ skills)
+- Local mode: Loads from local experiment skill directories (121 skills)
 
 Usage:
-    # Run from the SkillNet repo root (auto-detects skills location):
-    python -m experiments.experience_pipeline.run_pipeline
+    # Fetch from SkillNet API (default, 258k+ skills available):
+    python -m experiments.experience_pipeline.run_pipeline --skip-summary
 
-    # Or specify skills root explicitly:
+    # Fetch first 1000 skills from API:
     python -m experiments.experience_pipeline.run_pipeline \\
-        --skills-root ./experiments/src/skills
+        --max-skills 1000 --skip-summary
 
-    # Process specific domains only:
+    # Filter by category:
     python -m experiments.experience_pipeline.run_pipeline \\
-        --domains alfworld webshop \\
-        --output-dir ./results/skillnet
+        --category Development --skip-summary
+
+    # Use local mode (legacy, 121 experiment skills):
+    python -m experiments.experience_pipeline.run_pipeline \\
+        --mode local --skip-summary
 """
 
 import json
@@ -39,11 +42,13 @@ from typing import Any, Dict, List
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from experiments.experience_pipeline.data_loader import (
-    load_all_skills,
+    load_all_skills_from_api,
+    load_all_skills_from_local,
     save_samples,
     build_skill_content,
     ALL_DOMAINS,
     DEFAULT_SKILLS_ROOT,
+    SKILLNET_API_URL,
 )
 from experiments.experience_pipeline.summary_agent import SkillNetSummaryAgent
 
@@ -137,12 +142,21 @@ def print_statistics(experience_data: Dict[str, Any]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="SkillNet Experience Data Pipeline")
     parser.add_argument(
+        "--mode",
+        choices=["api", "local"],
+        default="api",
+        help=(
+            "Data source mode: 'api' fetches from SkillNet REST API (258k+ skills), "
+            "'local' loads from experiment skill directories (default: api)"
+        ),
+    )
+    parser.add_argument(
         "--skills-root",
         type=str,
         default=DEFAULT_SKILLS_ROOT,
         help=(
             "Root directory containing domain subdirectories "
-            "(default: experiments/src/skills)"
+            "(local mode only, default: experiments/src/skills)"
         ),
     )
     parser.add_argument(
@@ -150,7 +164,31 @@ def main() -> None:
         type=str,
         nargs="*",
         default=None,
-        help=f"Domains to process (default: all). Options: {ALL_DOMAINS}",
+        help=f"Domains to process in local mode (default: all). Options: {ALL_DOMAINS}",
+    )
+    parser.add_argument(
+        "--category",
+        type=str,
+        default=None,
+        help="Filter by category (API mode only, e.g. 'Development', 'Security')",
+    )
+    parser.add_argument(
+        "--min-stars",
+        type=int,
+        default=0,
+        help="Minimum star count filter (API mode only, default: 0)",
+    )
+    parser.add_argument(
+        "--sort-by",
+        choices=["stars", "recent"],
+        default="stars",
+        help="Sort order for API results (default: stars)",
+    )
+    parser.add_argument(
+        "--api-url",
+        type=str,
+        default=SKILLNET_API_URL,
+        help=f"SkillNet API base URL (default: {SKILLNET_API_URL})",
     )
     parser.add_argument(
         "--output-dir",
@@ -162,7 +200,7 @@ def main() -> None:
         "--max-skills",
         type=int,
         default=None,
-        help="Max skills per domain (None for all)",
+        help="Max skills to fetch (None for all)",
     )
     parser.add_argument(
         "--concurrency",
@@ -212,25 +250,41 @@ def main() -> None:
     print("=" * 60)
     print("SkillNet Experience Data Pipeline")
     print("=" * 60)
-    print(f"Skills root: {args.skills_root}")
-    print(f"Domains: {selected_domains}")
+    print(f"Mode: {args.mode}")
+    if args.mode == "api":
+        print(f"API URL: {args.api_url}")
+        print(f"Category filter: {args.category or 'all'}")
+        print(f"Min stars: {args.min_stars}")
+        print(f"Sort by: {args.sort_by}")
+    else:
+        print(f"Skills root: {args.skills_root}")
+        print(f"Domains: {selected_domains}")
     print(f"Output dir: {run_dir}")
-    print(f"Max skills per domain: {args.max_skills}")
+    print(f"Max skills: {args.max_skills}")
     print(f"Concurrency: {args.concurrency}")
     print(f"Summary model: {args.summary_model}")
     print("=" * 60)
 
     # ─── Step 1: Load skills ─────────────────────────────────────
     print("\n[Step 1] Loading SkillNet skills...")
-    skill_samples = load_all_skills(
-        skills_root=args.skills_root,
-        domains=selected_domains,
-        max_skills_per_domain=args.max_skills,
-    )
+    if args.mode == "api":
+        skill_samples = load_all_skills_from_api(
+            category=args.category,
+            min_stars=args.min_stars,
+            sort_by=args.sort_by,
+            max_skills=args.max_skills,
+            api_url=args.api_url,
+        )
+    else:
+        skill_samples = load_all_skills_from_local(
+            skills_root=args.skills_root,
+            domains=selected_domains,
+            max_skills_per_domain=args.max_skills,
+        )
     print(f"Loaded {len(skill_samples)} total skills")
 
     if not skill_samples:
-        print("No skills found. Check --skills-root path.")
+        print("No skills found. Check --mode and connection settings.")
         return
 
     samples_file = os.path.join(run_dir, "loaded_skills.json")
