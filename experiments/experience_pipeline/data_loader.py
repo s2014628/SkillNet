@@ -130,24 +130,14 @@ def fetch_all_skills(
     Returns:
         List of raw skill dicts from the API
     """
+    max_retries = 5
     all_skills: List[Dict[str, Any]] = []
     page = resume_from_page
     total_available = None
 
     while True:
-        try:
-            result = fetch_skills_page(
-                query=query,
-                page=page,
-                limit=page_size,
-                sort_by=sort_by,
-                category=category,
-                min_stars=min_stars,
-                api_url=api_url,
-            )
-        except requests.exceptions.RequestException as e:
-            print(f"  API error on page {page}: {e}")
-            time.sleep(2)
+        result = None
+        for attempt in range(1, max_retries + 1):
             try:
                 result = fetch_skills_page(
                     query=query,
@@ -158,9 +148,21 @@ def fetch_all_skills(
                     min_stars=min_stars,
                     api_url=api_url,
                 )
-            except requests.exceptions.RequestException as e2:
-                print(f"  Retry failed on page {page}: {e2}. Stopping.")
                 break
+            except requests.exceptions.RequestException as e:
+                wait_time = min(2 ** attempt, 60)
+                print(
+                    f"  API error on page {page} "
+                    f"(attempt {attempt}/{max_retries}): {e}"
+                )
+                if attempt < max_retries:
+                    print(f"  Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    print(f"  All {max_retries} retries failed. Stopping.")
+
+        if result is None:
+            break
 
         if not result.get("success", False):
             print(f"  API returned success=False on page {page}. Stopping.")
